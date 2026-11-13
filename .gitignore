@@ -1,0 +1,9 @@
+node_modules/
+.npm-cache/
+dist/
+backend/target/
+backend/data/
+.DS_Store
+*.log
+backend/.cache/
+work/

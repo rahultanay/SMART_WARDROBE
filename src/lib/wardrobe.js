@@ -1,0 +1,303 @@
+import { analyzePixels, paletteHarmony, patternCompatibility } from './appearance.js';
+import {
+  fitScore,
+  shadeEstimate,
+  effectiveStyles,
+  lookStyleScore,
+} from "./clothing-details.js";
+export const CATEGORIES = [
+  "Shirt",
+  "T-shirt",
+  "Hoodie",
+  "Traditional",
+  "Pants",
+  "Shoes",
+];
+export const DRESS_STYLES = ["Formal", "Semi-formal", "Casual", "Traditional"];
+export const TOP_CATEGORIES = ["Shirt", "T-shirt", "Hoodie", "Traditional"];
+export function roleOf(item) {
+  return TOP_CATEGORIES.includes(item.category) ? "Top" : item.category;
+}
+export function stylesForCategory(category) {
+  if (category === "T-shirt") return ["Semi-formal", "Casual"];
+  if (category === "Hoodie") return ["Casual"];
+  if (category === "Traditional") return ["Traditional"];
+  if (category === "Shirt") return ["Formal", "Semi-formal", "Casual"];
+  return DRESS_STYLES;
+}
+export function itemStyles(item) {
+  return effectiveStyles(item);
+}
+export function fitsContext(item, occasion, dressStyle) {
+  return (
+    !(
+      dressStyle === "Formal" &&
+      [
+        "Jeans",
+        "Joggers",
+        "Shorts",
+        "Graphic T-shirt",
+        "Sneakers",
+        "Sandals",
+      ].includes(item.details?.garmentType)
+    ) &&
+    itemStyles(item).includes(dressStyle) &&
+    stylesForCategory(item.category).includes(dressStyle) &&
+    (item.occasions.includes(occasion) || item.occasions.includes("Everyday"))
+  );
+}
+export const OCCASIONS = [
+  "College",
+  "Office",
+  "Party",
+  "Friends",
+  "Date",
+  "Everyday",
+  "Outing",
+];
+export const COLORS = {
+  White: "#eeeae0",
+  Black: "#303334",
+  Grey: "#999c9c",
+  Navy: "#253955",
+  Blue: "#6685a6",
+  Beige: "#c9b694",
+  Brown: "#89644e",
+  Green: "#6a8064",
+  Red: "#a44e47",
+  Pink: "#d0a0a0",
+  Purple: "#8e7b9d",
+  Yellow: "#d8ba60",
+  Orange: "#ca8959",
+};
+export const PATTERNS = ["Unknown", "Solid", "Striped", "Checked", "Printed"];
+const neutrals = new Set(["White", "Black", "Grey", "Navy", "Beige", "Brown"]);
+const pairs = new Set([
+  "Blue:Brown",
+  "Blue:Orange",
+  "Blue:Pink",
+  "Blue:Yellow",
+  "Green:Pink",
+  "Green:Red",
+  "Purple:Yellow",
+]);
+export function pairScore(a, b) {
+  if (a.color === b.color) {
+    const ah = a.details?.hex,
+      bh = b.details?.hex;
+    if (ah && bh) {
+      const lum = (h) =>
+        [1, 3, 5].reduce((s, k) => s + parseInt(h.slice(k, k + 2), 16), 0) / 3;
+      return Math.abs(lum(ah) - lum(bh)) > 55 ? 5 : 2;
+    }
+    return 2;
+  }
+  if (neutrals.has(a.color) || neutrals.has(b.color)) return 5;
+  return pairs.has([a.color, b.color].sort().join(":")) ? 4 : 1;
+}
+export function lastWear(history, id, occasion) {
+  return history
+    .filter(
+      (w) =>
+        (!occasion || w.occasion === occasion) &&
+        w.items.some((i) => i.id === id),
+    )
+    .sort((a, b) => Date.parse(b.wornAt) - Date.parse(a.wornAt))[0];
+}
+export function daysAgo(time, now = new Date()) {
+  const d = new Date(time);
+  return Math.max(
+    0,
+    Math.round(
+      (Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) -
+        Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())) /
+        86400000,
+    ),
+  );
+}
+export function ago(time) {
+  const n = daysAgo(time);
+  return n === 0 ? "Today" : n === 1 ? "Yesterday" : `${n} days ago`;
+}
+export function dateLabel(time) {
+  return new Date(time).toLocaleString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+export function recommend(
+  items,
+  history,
+  occasion,
+  anchorId = "",
+  preferred = [],
+  dressStyle = "Casual",
+) {
+  const latestById = new Map(),
+    latestByKey = new Map();
+  for (const wear of history) {
+    for (const item of wear.items) {
+      if (
+        !latestById.has(item.id) ||
+        Date.parse(latestById.get(item.id).wornAt) < Date.parse(wear.wornAt)
+      )
+        latestById.set(item.id, wear);
+    }
+    const key = wear.items
+      .map((i) => i.id)
+      .sort()
+      .join("|");
+    if (
+      !latestByKey.has(key) ||
+      Date.parse(latestByKey.get(key).wornAt) < Date.parse(wear.wornAt)
+    )
+      latestByKey.set(key, wear);
+  }
+  const available = items.filter(
+    (i) =>
+      !i.archived &&
+      !i.laundry &&
+      CATEGORIES.includes(i.category) &&
+      fitsContext(i, occasion, dressStyle),
+  );
+  const anchor = available.find((i) => i.id === anchorId);
+  // A selected piece must fit the context too. Never silently drop it or weaken the dress code.
+  if (anchorId && !anchor) return [];
+  const groups = ["Top", "Pants", "Shoes"].map((role) =>
+    available.filter(
+      (i) =>
+        roleOf(i) === role &&
+        (!anchor || roleOf(anchor) !== role || i.id === anchor.id),
+    ),
+  );
+  if (!groups[0].length || !groups[1].length) return [];
+  const rank = (i) =>
+    (i.occasions.includes(occasion) ? 4 : 0) +
+    (preferred.includes(i.color) ? 2 : 0) +
+    (anchor ? pairScore(anchor, i) : 0) -
+    (latestById.has(i.id)
+      ? Math.max(0, 7 - daysAgo(latestById.get(i.id).wornAt)) / 2
+      : 0);
+  groups.forEach((g) =>
+    g.sort((a, b) => rank(b) - rank(a) || a.id.localeCompare(b.id)),
+  );
+  const result = [];
+  // Shoes complete a look when available; they never block top-and-pants suggestions.
+  const shoeChoices = groups[2].length ? groups[2].slice(0, 20) : [null];
+  for (const top of groups[0].slice(0, 20))
+    for (const pants of groups[1].slice(0, 20))
+      for (const shoes of shoeChoices) {
+        if (fitScore(top, pants, dressStyle) <= -10) continue;
+        const outfit = [top, pants, ...(shoes ? [shoes] : [])];
+        const matching =
+          pairScore(top, pants) + paletteHarmony(top,pants) + patternCompatibility(top,pants) +
+          (shoes ? pairScore(pants, shoes) + pairScore(top, shoes) : 0);
+        const printPenalty =
+          Math.max(0, outfit.filter((i) => ["Striped","Checked","Printed"].includes(i.pattern)).length - 1) *
+          3;
+        const key = outfit
+          .map((i) => i.id)
+          .sort()
+          .join("|");
+        const prior = latestByKey.get(key);
+        const score =
+          matching +
+          lookStyleScore(top, pants, dressStyle) +
+          fitScore(top, pants, dressStyle) +
+          outfit.reduce((sum, i) => sum + rank(i), 0) -
+          printPenalty -
+          (prior ? Math.max(0, 10 - daysAgo(prior.wornAt)) : 0);
+        const pairing = neutrals.has(pants.color)
+          ? `${pants.details?.shade || pants.color} pants give your ${top.color.toLowerCase()} ${top.category.toLowerCase()} a neutral base.`
+          : `${top.color} and ${pants.color.toLowerCase()} make ${pairScore(top, pants) >= 4 ? "a balanced" : "a bolder"} pairing.`;
+        result.push({
+          key,
+          items: outfit,
+          score,
+          prior,
+          dressStyle,
+          occasion,
+          reason: `${dressStyle === "Formal" ? "Prioritizes restrained colors and clear shirt/pants contrast." : dressStyle === "Semi-formal" ? "Balances a smart neutral base with softer contrast." : "Prioritizes relaxed pieces and flexible color pairings."} ${outfit.some((i) => i.details?.styleMode !== "manual" && (!i.details?.garmentType || i.details.garmentType === "Unknown")) ? "Garment construction is unconfirmed; this is a color-led suggestion. Confirm the garment type for a stricter dress code." : ""} ${pairing} ${["Striped","Checked","Printed"].includes(top.pattern) && pants.pattern === "Solid" ? "A patterned top with plain pants keeps the look balanced." : ""} ${outfit.some(i=>!i.pattern || i.pattern === "Unknown") ? "Pattern is unconfirmed on one or more pieces." : ""} ${top.details?.fit && pants.details?.fit ? `Fit: ${top.details.fit.toLowerCase()} top / ${pants.details.fit.toLowerCase()} pants.` : ""} ${shoes ? `${shoes.color} shoes complete the look.` : "Add suitable shoes to complete this look."}`,
+        });
+      }
+  const sorted = result.sort(
+    (a, b) => b.score - a.score || a.key.localeCompare(b.key),
+  );
+  // Round-robin across top/bottom pairs so shoe variants cannot crowd out clothing alternatives.
+  const buckets = new Map();
+  for (const look of sorted) {
+    const key = look.items
+      .slice(0, 2)
+      .map((i) => i.id)
+      .join("|");
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(look);
+  }
+  const diverse = [];
+  for (let round = 0; diverse.length < 30; round++) {
+    let added = false;
+    for (const bucket of buckets.values()) {
+      if (bucket[round]) {
+        diverse.push(bucket[round]);
+        added = true;
+        if (diverse.length === 30) break;
+      }
+    }
+    if (!added) break;
+  }
+  return diverse;
+}
+export async function api(path, method = "GET", body) {
+  let response;
+  try {
+    response = await fetch(`/api${path}`, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch {
+    throw new Error(
+      "Cannot reach your wardrobe. Start the backend, then retry. If a save timed out, refresh before retrying.",
+    );
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok)
+    throw new Error(
+      data.message || `Request failed (${response.status}). Please retry.`,
+    );
+  return data;
+}
+export async function photoData(file, { maxSide = 1000 } = {}) {
+  if (!file || !["image/jpeg", "image/png", "image/webp"].includes(file.type))
+    throw new Error("Choose a JPEG, PNG, or WebP image.");
+  if (file.size > 15 * 1024 * 1024)
+    throw new Error("Choose a photo under 15 MB.");
+  const bitmap = await createImageBitmap(file).catch(() => {
+    throw new Error("This photo could not be read. Try a different image.");
+  });
+  const canvas = document.createElement("canvas");
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#f4f1e9";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  const photo = canvas.toDataURL("image/jpeg", 0.8);
+  if (photo.length > 2000000)
+    throw new Error("Photo is too detailed. Please crop it and try again.");
+  const analysis = analyzePixels(ctx.getImageData(0,0,canvas.width,canvas.height).data,canvas.width,canvas.height);
+  return { photo, ...analysis };
+}
+
+function distance(hex, rgb) {
+  return rgb.reduce(
+    (s, v, k) => s + (v - parseInt(hex.slice(1 + k * 2, 3 + k * 2), 16)) ** 2,
+    0,
+  );
+}
